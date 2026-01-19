@@ -29,6 +29,9 @@ type Client interface {
 	LPush(ctx context.Context, key string, values ...interface{}) *redis.IntCmd
 	BLPop(ctx context.Context, timeout time.Duration, keys ...string) *redis.StringSliceCmd
 	Del(ctx context.Context, keys ...string) *redis.IntCmd
+	Get(ctx context.Context, key string) *redis.StringCmd
+	SetNX(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.BoolCmd
+	Eval(ctx context.Context, script string, keys []string, args ...interface{}) *redis.Cmd
 
 	// Membership tracking (ZSET)
 	ZAdd(ctx context.Context, key string, members ...redis.Z) *redis.IntCmd

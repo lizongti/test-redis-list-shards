@@ -19,7 +19,21 @@
 ## 执行约定
 
 - Windows 平台下统一使用 WSL（wsl.exe -e bash -lc）；macOS 平台下统一使用 zsh；linux 平台下统一使用 bash。
-- 允许根据需求创建所需的AWS资源
+
+> 说明：本项目为本地 Redis + Go 程序验证用途，不涉及创建任何 AWS 资源。
+
+## 实现补充：多实例无中心再平衡
+
+当前仓库实现支持同时启动多个 server 实例（见 `docker-compose.yml` 的 `server1/server2/server3`），并在无中心调度的情况下实现自动再平衡：
+
+- 所有实例把自己的 `INSTANCE_ID` 作为 member 心跳写入 Redis ZSET（默认 key：`test-redis-list-shards:members`）。
+- 所有实例读取同一份 `members` 列表，并用 Rendezvous Hash 为每个 shard 计算唯一 `owner`。
+- 每个实例只启动 `owner==自己` 的 shard worker（goroutine），不拥有的 shard 会停止 worker。
+- 建议在多实例模式使用固定 `SHARD_COUNT`（例如 32/64），保证 shard ID 集合稳定（`[0..SHARD_COUNT)`），避免动态 shardCount 带来的短暂不一致。
+
+可观测性：
+
+- `GET /shards` 会返回每个 shard 的 `owner` 以及该 shard 是否为本实例本地拥有（`local`）。
 
 ## 测试用例
 

@@ -25,6 +25,14 @@ type Config struct {
 	MemberKey  string
 	MemberTTL  time.Duration
 
+	// Shard lease（用于更快 failover / 1s 量级再平衡）
+	// 当启用时：允许多个实例为同一 shard 启动 standby worker，但只有拿到租约的实例才会真正 BLPOP 消费。
+	LeaseEnabled    bool
+	LeaseKeyPrefix  string
+	LeaseTTL        time.Duration
+	LeaseRenewEvery time.Duration
+	StandbyDepth    int
+
 	HTTPAddr   string
 	PopEnabled bool
 	PopTimeout time.Duration

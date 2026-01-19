@@ -41,6 +41,11 @@ func RunServer(ctx context.Context, cfg Config) error {
 		InstanceID:    cfg.InstanceID,
 		MemberKey:     cfg.MemberKey,
 		MemberTTL:     cfg.MemberTTL,
+		LeaseEnabled:    cfg.LeaseEnabled,
+		LeaseKeyPrefix:  cfg.LeaseKeyPrefix,
+		LeaseTTL:        cfg.LeaseTTL,
+		LeaseRenewEvery: cfg.LeaseRenewEvery,
+		StandbyDepth:    cfg.StandbyDepth,
 		PopEnabled:    cfg.PopEnabled,
 		PopTimeout:    cfg.PopTimeout,
 	})

@@ -41,6 +41,19 @@ type ManagerConfig struct {
 	// MemberTTL 是成员过期时间；超过该时间未刷新心跳的成员会被清理。
 	MemberTTL time.Duration
 
+	// LeaseEnabled 启用 shard 租约。
+	// 启用后：允许多个实例为同一 shard 启动 standby worker，但只有拿到租约的实例才会真正消费该 shard。
+	LeaseEnabled bool
+	// LeaseKeyPrefix 用于生成租约 key：LeaseKeyPrefix + shardID。
+	LeaseKeyPrefix string
+	// LeaseTTL 租约过期时间。要实现 ~1s 量级 failover，通常设为 1s 左右。
+	LeaseTTL time.Duration
+	// LeaseRenewEvery 续租周期，应小于 LeaseTTL（例如 LeaseTTL/3）。
+	LeaseRenewEvery time.Duration
+	// StandbyDepth 表示每个 shard 允许多少个“候选实例”启动 standby worker。
+	// 1 表示仅 preferred owner 启动；2 表示 owner + 备份（可显著缩短 failover）。
+	StandbyDepth int
+
 	PopEnabled bool
 	PopTimeout time.Duration
 }
@@ -89,6 +102,18 @@ func NewManager(cfg ManagerConfig) *Manager {
 	}
 	if cfg.MemberTTL <= 0 {
 		cfg.MemberTTL = 6 * time.Second
+	}
+	if cfg.LeaseKeyPrefix == "" {
+		cfg.LeaseKeyPrefix = "test-redis-list-shards:lease:"
+	}
+	if cfg.LeaseTTL <= 0 {
+		cfg.LeaseTTL = 2 * time.Second
+	}
+	if cfg.LeaseRenewEvery <= 0 {
+		cfg.LeaseRenewEvery = 700 * time.Millisecond
+	}
+	if cfg.StandbyDepth <= 0 {
+		cfg.StandbyDepth = 1
 	}
 
 	m := &Manager{cfg: cfg, stopCh: make(chan struct{}), workers: make(map[int]*worker)}
@@ -181,10 +206,11 @@ func (m *Manager) refreshOnce(ctx context.Context) error {
 		assignments = splitKeys(keys, shardCount)
 	}
 
-	owners := computeShardOwners(shardCount, members)
-	m.reconcileWorkers(owners)
-	m.applyAssignments(assignments, owners)
-	m.updateSnapshot(assignments, owners, members)
+	preferences := computeShardPreferences(shardCount, members)
+	desiredOwners := preferredOwnersFrom(preferences)
+	m.reconcileWorkers(preferences, desiredOwners)
+	m.applyAssignments(assignments)
+	m.updateSnapshot(ctx, assignments, desiredOwners, members)
 	return nil
 }
 
@@ -203,20 +229,38 @@ func assignKeysByHash(keys []string, shardCount int) [][]string {
 	return out
 }
 
-func (m *Manager) reconcileWorkers(owners []string) {
+func (m *Manager) reconcileWorkers(preferences [][]string, desiredOwners []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	owned := make(map[int]struct{}, len(owners))
-	for shardID, owner := range owners {
-		if owner == m.cfg.InstanceID {
-			owned[shardID] = struct{}{}
+	shouldRun := make(map[int]struct{}, len(preferences))
+	for shardID := 0; shardID < len(preferences); shardID++ {
+		// 未启用 lease 时：保持原行为，仅 preferred owner 运行。
+		if !m.cfg.LeaseEnabled {
+			if shardID < len(desiredOwners) && desiredOwners[shardID] == m.cfg.InstanceID {
+				shouldRun[shardID] = struct{}{}
+			}
+			continue
+		}
+
+		depth := m.cfg.StandbyDepth
+		if depth <= 0 {
+			depth = 1
+		}
+		if depth > len(preferences[shardID]) {
+			depth = len(preferences[shardID])
+		}
+		for i := 0; i < depth; i++ {
+			if preferences[shardID][i] == m.cfg.InstanceID {
+				shouldRun[shardID] = struct{}{}
+				break
+			}
 		}
 	}
 
 	// stop workers we no longer own
 	for shardID, w := range m.workers {
-		if _, ok := owned[shardID]; ok {
+		if _, ok := shouldRun[shardID]; ok {
 			continue
 		}
 		w.stop()
@@ -225,18 +269,28 @@ func (m *Manager) reconcileWorkers(owners []string) {
 	}
 
 	// start missing workers we should own
-	for shardID := range owned {
+	for shardID := range shouldRun {
 		if _, ok := m.workers[shardID]; ok {
 			continue
 		}
-		w := newWorker(shardID, m.cfg.Rdb, m.cfg.PopEnabled, m.cfg.PopTimeout)
+		w := newWorker(workerConfig{
+			ID:             shardID,
+			Rdb:            m.cfg.Rdb,
+			PopEnabled:     m.cfg.PopEnabled,
+			PopTimeout:     m.cfg.PopTimeout,
+			LeaseEnabled:   m.cfg.LeaseEnabled,
+			LeaseKey:       m.cfg.LeaseKeyPrefix + strconv.Itoa(shardID),
+			LeaseValue:     m.cfg.InstanceID,
+			LeaseTTL:       m.cfg.LeaseTTL,
+			LeaseRenewEvery: m.cfg.LeaseRenewEvery,
+		})
 		m.workers[shardID] = w
 		w.start()
 		log.Printf("shard worker started: id=%d", shardID)
 	}
 }
 
-func (m *Manager) applyAssignments(assignments [][]string, owners []string) {
+func (m *Manager) applyAssignments(assignments [][]string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for shardID := 0; shardID < len(assignments); shardID++ {
@@ -244,15 +298,16 @@ func (m *Manager) applyAssignments(assignments [][]string, owners []string) {
 		if !ok {
 			continue
 		}
-		// 只会存在本实例拥有的 shard worker
-		_ = owners // owners 已用于 reconcile
+		// 只会存在本实例需要运行的 shard worker（owner 或 standby）
 		w.setKeys(assignments[shardID])
 	}
 }
 
-func (m *Manager) updateSnapshot(assignments [][]string, owners []string, members []string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (m *Manager) updateSnapshot(ctx context.Context, assignments [][]string, owners []string, members []string) {
+	// 不持锁做 Redis I/O，避免阻塞 /shards 的 Snapshot 读取。
+	instanceID := m.cfg.InstanceID
+	leaseEnabled := m.cfg.LeaseEnabled
+	leasePrefix := m.cfg.LeaseKeyPrefix
 
 	shardsInfo := make([]ShardInfo, 0, len(assignments))
 	for i, lists := range assignments {
@@ -260,14 +315,28 @@ func (m *Manager) updateSnapshot(assignments [][]string, owners []string, member
 		if i < len(owners) {
 			owner = owners[i]
 		}
+		leaseOwner := ""
+		local := owner == instanceID
+		if leaseEnabled {
+			local = false
+			v, err := m.cfg.Rdb.Get(ctx, leasePrefix+strconv.Itoa(i)).Result()
+			if err == nil {
+				leaseOwner = v
+				local = leaseOwner == instanceID
+			}
+		}
 		shardsInfo = append(shardsInfo, ShardInfo{
-			ID:        i,
-			Owner:     owner,
-			Local:     owner == m.cfg.InstanceID,
-			ListCount: len(lists),
-			Lists:     append([]string(nil), lists...),
+			ID:         i,
+			Owner:      owner,
+			LeaseOwner: leaseOwner,
+			Local:      local,
+			ListCount:  len(lists),
+			Lists:      append([]string(nil), lists...),
 		})
 	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	m.snap = Snapshot{
 		InstanceID:    m.cfg.InstanceID,
@@ -411,6 +480,56 @@ func computeShardOwners(shardCount int, members []string) []string {
 	out := make([]string, shardCount)
 	for shardID := 0; shardID < shardCount; shardID++ {
 		out[shardID] = rendezvousPickOwner(shardID, members)
+	}
+	return out
+}
+
+// computeShardPreferences 为每个 shard 计算成员的偏好序列（Rendezvous 分数从高到低）。
+// 所有实例在 members 相同（顺序无关）时会得到相同结果。
+func computeShardPreferences(shardCount int, members []string) [][]string {
+	if shardCount <= 0 {
+		shardCount = 1
+	}
+	out := make([][]string, shardCount)
+	if len(members) == 0 {
+		for i := range out {
+			out[i] = nil
+		}
+		return out
+	}
+	for shardID := 0; shardID < shardCount; shardID++ {
+		type scored struct {
+			member string
+			score  uint64
+		}
+		s := make([]scored, 0, len(members))
+		shardKey := strconv.Itoa(shardID)
+		for _, member := range members {
+			s = append(s, scored{member: member, score: xxhash.Sum64String(member + ":" + shardKey)})
+		}
+		sort.Slice(s, func(i, j int) bool {
+			if s[i].score == s[j].score {
+				return s[i].member < s[j].member
+			}
+			return s[i].score > s[j].score
+		})
+		prefs := make([]string, 0, len(s))
+		for _, it := range s {
+			prefs = append(prefs, it.member)
+		}
+		out[shardID] = prefs
+	}
+	return out
+}
+
+func preferredOwnersFrom(preferences [][]string) []string {
+	out := make([]string, len(preferences))
+	for shardID := range preferences {
+		if len(preferences[shardID]) == 0 {
+			out[shardID] = ""
+			continue
+		}
+		out[shardID] = preferences[shardID][0]
 	}
 	return out
 }

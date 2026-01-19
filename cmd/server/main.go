@@ -30,6 +30,11 @@ func main() {
 		instanceID    = flag.String("instance-id", envOr("INSTANCE_ID", ""), "Unique instance id for multi-server ownership")
 		memberKey     = flag.String("member-key", envOr("MEMBER_KEY", "test-redis-list-shards:members"), "Redis ZSET key for membership")
 		memberTTL     = flag.Duration("member-ttl", envOrDuration("MEMBER_TTL", 6*time.Second), "Membership TTL")
+		leaseEnabled  = flag.Bool("lease-enabled", envOrBool("LEASE_ENABLED", false), "Enable per-shard lease (fast failover)")
+		leasePrefix   = flag.String("lease-prefix", envOr("LEASE_KEY_PREFIX", "test-redis-list-shards:lease:"), "Redis key prefix for shard lease")
+		leaseTTL      = flag.Duration("lease-ttl", envOrDuration("LEASE_TTL", 2*time.Second), "Shard lease TTL")
+		leaseRenew    = flag.Duration("lease-renew", envOrDuration("LEASE_RENEW_EVERY", 700*time.Millisecond), "Shard lease renew interval")
+		standbyDepth  = flag.Int("standby-depth", envOrInt("STANDBY_DEPTH", 1), "How many top-ranked instances run standby workers per shard (1=only preferred owner)")
 		httpAddr      = flag.String("http", envOr("HTTP_ADDR", ":8080"), "HTTP listen address")
 		popEnabled    = flag.Bool("pop", envOrBool("POP_ENABLED", true), "Enable BLPOP workers")
 		popTimeout    = flag.Duration("pop-timeout", envOrDuration("POP_TIMEOUT", 1*time.Second), "BLPOP timeout (per call)")
@@ -50,6 +55,11 @@ func main() {
 		InstanceID:    *instanceID,
 		MemberKey:     *memberKey,
 		MemberTTL:     *memberTTL,
+		LeaseEnabled:    *leaseEnabled,
+		LeaseKeyPrefix:  *leasePrefix,
+		LeaseTTL:        *leaseTTL,
+		LeaseRenewEvery: *leaseRenew,
+		StandbyDepth:    *standbyDepth,
 		HTTPAddr:      *httpAddr,
 		PopEnabled:    *popEnabled,
 		PopTimeout:    *popTimeout,
