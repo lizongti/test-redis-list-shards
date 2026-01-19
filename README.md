@@ -60,7 +60,7 @@ export LEASE_TTL=1s
 export LEASE_RENEW_EVERY=300ms
 ```
 
-权衡：standbyDepth 越大，实例数越多，总的 worker goroutine 数越多（例如 32 shards * 2 depth * N 实例上限），但换来更短的 failover。
+权衡：standbyDepth 越大，实例数越多，总的 worker goroutine 数越多（例如 32 shards _ 2 depth _ N 实例上限），但换来更短的 failover。
 
 下面的时序图展示了“成员变化 → owner 重算 → 本机启停 worker → 自动再平衡”的过程：
 
