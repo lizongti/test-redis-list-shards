@@ -1,0 +1,73 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: test-redis-list-shards-redis
+    ports:
+      - "6380:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
+  server1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - redis
+    environment:
+      REDIS_ADDRS: "redis:6379"
+      LIST_KEY_PATTERN: "list:*"
+      LISTS_PER_SHARD: "8"
+      SHARD_COUNT: "32"
+      SHARD_REFRESH: "1s"
+      INSTANCE_ID: "server1"
+      MEMBER_KEY: "test-redis-list-shards:members"
+      MEMBER_TTL: "6s"
+      POP_ENABLED: "true"
+      POP_TIMEOUT: "1s"
+      HTTP_ADDR: ":8080"
+      LOG_PREFIX: "server1"
+    ports:
+      - "8080:8080"
+
+  server2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - redis
+    environment:
+      REDIS_ADDRS: "redis:6379"
+      LIST_KEY_PATTERN: "list:*"
+      LISTS_PER_SHARD: "8"
+      SHARD_COUNT: "32"
+      SHARD_REFRESH: "1s"
+      INSTANCE_ID: "server2"
+      MEMBER_KEY: "test-redis-list-shards:members"
+      MEMBER_TTL: "6s"
+      POP_ENABLED: "true"
+      POP_TIMEOUT: "1s"
+      HTTP_ADDR: ":8080"
+      LOG_PREFIX: "server2"
+    ports:
+      - "8081:8080"
+
+  server3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - redis
+    environment:
+      REDIS_ADDRS: "redis:6379"
+      LIST_KEY_PATTERN: "list:*"
+      LISTS_PER_SHARD: "8"
+      SHARD_COUNT: "32"
+      SHARD_REFRESH: "1s"
+      INSTANCE_ID: "server3"
+      MEMBER_KEY: "test-redis-list-shards:members"
+      MEMBER_TTL: "6s"
+      POP_ENABLED: "true"
+      POP_TIMEOUT: "1s"
+      HTTP_ADDR: ":8080"
+      LOG_PREFIX: "server3"
+    ports:
+      - "8082:8080"
